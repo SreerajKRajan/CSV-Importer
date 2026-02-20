@@ -1,0 +1,3 @@
+name,email,phone,service_name,staff_name,start_time,end_time,timezone
+Jane Doe,jane@example.com,+15551234567,Haircut,Jane Smith,1/15/2025 10:00:00,1/15/2025 10:30:00,America/New_York
+John Smith,john@example.com,+15559876543,Haircut,John Staff,12/1/2026 14:00:00,12/1/2026 14:45:00,UTC
