@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from ghl_accounts.models import GHLAuthCredentials, ImportedAppointment, ServiceCalendarMapping
+from ghl_accounts.models import GHLAuthCredentials, GHLService, ImportedAppointment, ServiceCalendarMapping
 
 
 @admin.register(GHLAuthCredentials)
@@ -8,6 +8,12 @@ class GHLAuthCredentialsAdmin(admin.ModelAdmin):
     list_display = ("location_id", "company_id", "user_id")
     list_filter = ("user_type",)
 
+
+@admin.register(GHLService)
+class GHLServiceAdmin(admin.ModelAdmin):
+    list_display = ("location_id", "name", "service_id", "updated_at")
+    list_filter = ("location_id",)
+    search_fields = ("name", "service_id")
 
 @admin.register(ServiceCalendarMapping)
 class ServiceCalendarMappingAdmin(admin.ModelAdmin):

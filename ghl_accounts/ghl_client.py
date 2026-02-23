@@ -73,6 +73,46 @@ def get_calendars(
         return (None, str(e))
 
 
+def get_services_catalog(
+    access_token: str,
+    location_id: str,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[Optional[list], Optional[str]]:
+    """
+    Get services catalog from GHL. Returns (list of service dicts with id/name, None) or (None, error_detail).
+    GET /calendars/services/catalog
+    Requires location_id (header + query). Token from GHLAuthCredentials.
+    """
+    url = f"{GHL_API_BASE}/calendars/services/catalog"
+    headers = _headers(access_token, location_id, version)
+    params = {"locationId": location_id}
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        services = data.get("services") or data.get("service") or []
+        if isinstance(services, dict):
+            services = [services]
+        if not isinstance(services, list):
+            services = []
+        # Normalize: ensure each item has id and name (GHL may use id/serviceId, name/title)
+        out = []
+        for s in services:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get("id") or s.get("serviceId")
+            name = (s.get("name") or s.get("title") or "").strip()
+            if sid and name is not None:
+                out.append({"id": str(sid), "name": name})
+        return (out, None)
+    except requests.HTTPError as e:
+        _log_response_error("GHL get services catalog", e.response)
+        return (None, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL get services catalog failed: %s", e)
+        return (None, str(e))
+
+
 def get_calendar_detail(
     access_token: str,
     location_id: str,
@@ -186,6 +226,7 @@ def create_service_booking(
     timezone: str = "UTC",
     calendar_id: Optional[str] = None,
     version: Optional[str] = None,
+    override_availability: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Create a calendar service booking. Returns (booking_id, None) on success, (None, error_detail) on failure.
@@ -215,8 +256,8 @@ def create_service_booking(
     }
     if calendar_id:
         payload["serviceLocationId"] = calendar_id
-    # Skip slot validation so imported appointments are accepted (per GHL Create Service Booking docs)
-    params = {"overrideAvailability": "true"}
+    # When False, respect slot conflicts (client requirement). When True, allow import (current behavior).
+    params = {"overrideAvailability": "true" if override_availability else "false"}
     try:
         resp = requests.post(url, json=payload, headers=headers, params=params, timeout=30)
         resp.raise_for_status()

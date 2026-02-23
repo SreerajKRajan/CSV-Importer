@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSV Appointment Importer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 1rem; }
+    h1 { font-size: 1.25rem; }
+    label { display: block; margin-top: 0.5rem; }
+    input[type="file"], select, button { margin-top: 0.25rem; }
+    button { padding: 0.5rem 1rem; cursor: pointer; margin-right: 0.5rem; margin-top: 0.5rem; }
+    .section { margin-top: 1.5rem; padding: 1rem; border: 1px solid #ddd; border-radius: 6px; }
+    #result { white-space: pre-wrap; font-size: 0.9rem; }
+    .error { color: #c00; }
+    .success { color: #060; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; }
+    th { background: #f5f5f5; }
+  </style>
+</head>
+<body>
+  {% csrf_token %}
+  <h1>CSV Appointment Importer</h1>
+  <p>Upload a CSV, optionally preview (dry-run), then import into HighLevel Services V2.</p>
+
+  <div class="section">
+    <label>CSV file (required)</label>
+    <input type="file" id="file" accept=".csv">
+    <label>Date format in CSV</label>
+    <select id="dateFormat">
+      <option value="">Auto-detect</option>
+      <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+      <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+      <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+      <option value="ISO">ISO</option>
+    </select>
+    <label>
+      <input type="checkbox" id="overrideAvailability" checked>
+      Override slot availability (if unchecked, conflicting slots will be marked as errors)
+    </label>
+    <div style="margin-top: 1rem;">
+      <button type="button" id="btnPreview">Preview (dry-run)</button>
+      <button type="button" id="btnImport">Import</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2 style="margin-top: 0;">Result</h2>
+    <div id="result">No run yet.</div>
+    <div id="rowResults"></div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('file');
+    const dateFormat = document.getElementById('dateFormat');
+    const overrideAvailability = document.getElementById('overrideAvailability');
+    const btnPreview = document.getElementById('btnPreview');
+    const btnImport = document.getElementById('btnImport');
+    const resultEl = document.getElementById('result');
+    const rowResultsEl = document.getElementById('rowResults');
+
+    function getApiBase() {
+      const base = window.location.origin;
+      return base + '/api';
+    }
+
+    function showResult(text, isError) {
+      resultEl.textContent = text;
+      resultEl.className = isError ? 'error' : 'success';
+    }
+
+    function showRowResults(data) {
+      if (!data.row_results || !data.row_results.length) {
+        rowResultsEl.innerHTML = '';
+        return;
+      }
+      let html = '<h3>Per-row report</h3><table><thead><tr><th>Row</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+      data.row_results.forEach(function (r) {
+        const status = r.success ? 'OK' : 'Failed';
+        const details = r.ghl_booking_id ? 'Booking: ' + r.ghl_booking_id : (r.error || '');
+        html += '<tr><td>' + r.row + '</td><td>' + status + '</td><td>' + details + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      rowResultsEl.innerHTML = html;
+    }
+
+    function run(dryRun) {
+      const file = fileInput.files[0];
+      if (!file) {
+        showResult('Please select a CSV file.', true);
+        return;
+      }
+      resultEl.textContent = dryRun ? 'Running preview…' : 'Importing…';
+      rowResultsEl.innerHTML = '';
+
+      const form = new FormData();
+      const csrf = document.querySelector('[name=csrfmiddlewaretoken]');
+      if (csrf && csrf.value) form.append('csrfmiddlewaretoken', csrf.value);
+      form.append('file', file);
+      form.append('dry_run', dryRun);
+      form.append('override_availability', overrideAvailability.checked);
+      const df = dateFormat.value;
+      if (df) form.append('date_format', df);
+
+      fetch(getApiBase() + '/import-appointments/', {
+        method: 'POST',
+        body: form
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.error && !data.success) {
+            showResult('Error: ' + data.error, true);
+            return;
+          }
+          let msg = '';
+          if (data.dry_run !== undefined || data.would_succeed !== undefined) {
+            msg = 'Preview: total=' + data.total_rows + ', would succeed=' + (data.would_succeed || 0) + ', would fail=' + (data.would_fail || 0);
+          } else {
+            msg = 'Imported=' + (data.imported || 0) + ', past=' + (data.past_count || 0) + ', future=' + (data.future_count || 0) + ', created_bookings=' + (data.created_bookings || 0);
+            if (data.errors && data.errors.length) msg += '\nErrors: ' + data.errors.join('; ');
+          }
+          if (data.location_id_used) msg += '\nLocation: ' + data.location_id_used;
+          showResult(msg, false);
+          showRowResults(data);
+        })
+        .catch(function (err) {
+          showResult('Request failed: ' + err.message, true);
+        });
+    }
+
+    btnPreview.onclick = function () { run(true); };
+    btnImport.onclick = function () { run(false); };
+  </script>
+</body>
+</html>

@@ -3,16 +3,19 @@ import logging
 import requests
 from decouple import config
 from django.http import JsonResponse
-from django.shortcuts import redirect
+from django.middleware.csrf import get_token
+from django.shortcuts import redirect, render
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ghl_accounts.ghl_client import get_calendar_detail, get_calendars
-from ghl_accounts.models import GHLAuthCredentials
+from ghl_accounts.ghl_client import get_calendar_detail, get_calendars, get_services_catalog
+from ghl_accounts.models import GHLAuthCredentials, GHLService, ImportedAppointment
 from ghl_accounts.serializers import ImportAppointmentsSerializer
 from ghl_accounts.services import run_import
+import csv
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,16 @@ GHL_REDIRECTED_URI = config("GHL_REDIRECTED_URI")
 TOKEN_URL = "https://services.leadconnectorhq.com/oauth/token"
 SCOPE = config("SCOPE")
 version_id = config("version_id")
+
+def import_app_page(request):
+    """Serve the iframe-ready CSV importer UI (for GHL custom section)."""
+    return render(request, "ghl_accounts/import_app.html")
+
+
+def csrf_token_view(request):
+    """GET /api/csrf/: return CSRF token for SPA (e.g. React dev server)."""
+    return JsonResponse({"csrfToken": get_token(request)})
+
 
 def auth_connect(request):
     auth_url = ("https://marketplace.gohighlevel.com/oauth/chooselocation?response_type=code&"
@@ -120,19 +133,54 @@ class ImportAppointmentsView(APIView):
             location_id = creds.location_id
 
         file_content = file_obj.read()
+        dry_run = serializer.validated_data.get("dry_run", False)
+        override_availability = serializer.validated_data.get("override_availability", True)
+        date_format = (serializer.validated_data.get("date_format") or "").strip() or None
+        column_mapping = serializer.validated_data.get("column_mapping")
 
         result = run_import(
             file_content=file_content,
             location_id=location_id,
             version="2021-07-28",
+            dry_run=dry_run,
+            override_availability=override_availability,
+            date_format=date_format,
+            column_mapping=column_mapping,
         )
 
         if not result.get("success"):
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
 
-        # So the user knows which location was used (especially when we auto-picked it)
         result["location_id_used"] = location_id
         return Response(result, status=status.HTTP_200_OK)
+
+
+class CSVDetectHeadersView(APIView):
+    """POST /api/import-appointments/detect-headers: upload CSV, returns first row (headers) for column mapping."""
+
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request):
+        file_obj = request.FILES.get("file")
+        if not file_obj:
+            return Response(
+                {"error": "No file. Send 'file' with CSV."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not file_obj.name.lower().endswith(".csv"):
+            return Response(
+                {"error": "File must be a CSV."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            content = file_obj.read().decode("utf-8", errors="replace")
+            reader = csv.reader(io.StringIO(content))
+            header_row = next(reader, None)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if not header_row:
+            return Response({"headers": [], "error": "Empty file."}, status=status.HTTP_200_OK)
+        return Response({"headers": header_row}, status=status.HTTP_200_OK)
 
 
 class GHLMappingIdsView(APIView):
@@ -191,3 +239,99 @@ class GHLMappingIdsView(APIView):
                 )
                 result["first_calendar_detail"] = detail
         return Response(result, status=status.HTTP_200_OK)
+
+
+class SyncServicesCatalogView(APIView):
+    """
+    POST /api/sync-services-catalog/ (optional ?location_id=...)
+    Fetches GHL services catalog and stores them in DB (GHLService).
+    After sync, import can resolve service_id from service_name without service_id in CSV.
+    """
+
+    def post(self, request):
+        # Use location_id from query or from stored OAuth (GHLAuthCredentials)
+        location_id = request.query_params.get("location_id", "").strip()
+        if not location_id:
+            creds = GHLAuthCredentials.objects.first()
+            if not creds or not creds.location_id:
+                return Response(
+                    {"error": "No GHL location connected. Connect GoHighLevel first, or pass ?location_id=..."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            location_id = creds.location_id
+        else:
+            creds = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        if not creds:
+            return Response(
+                {"error": "No OAuth credentials found for this location_id."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Token and location_id both from GHLAuthCredentials (or same location)
+        services, err = get_services_catalog(
+            access_token=creds.access_token,
+            location_id=location_id,
+            version="2021-07-28",
+        )
+        if err:
+            return Response({"error": err, "synced": 0}, status=status.HTTP_400_BAD_REQUEST)
+        count = 0
+        for s in services or []:
+            _, created = GHLService.objects.update_or_create(
+                location_id=location_id,
+                service_id=s["id"],
+                defaults={"name": s["name"]},
+            )
+            count += 1
+        return Response({
+            "success": True,
+            "location_id": location_id,
+            "synced": count,
+            "message": f"Synced {count} services for location {location_id}.",
+        }, status=status.HTTP_200_OK)
+
+
+class PastAppointmentsListView(APIView):
+    """
+    GET /api/past-appointments/?page=1&page_size=25
+    Returns past appointments saved in DB (is_past=True) from CSV imports.
+    Paginated: page (1-based), page_size (default 25, max 100).
+    """
+
+    def get(self, request):
+        page = request.query_params.get("page", "1")
+        page_size = request.query_params.get("page_size", "25")
+        try:
+            page = max(1, int(page))
+        except ValueError:
+            page = 1
+        try:
+            page_size = min(max(1, int(page_size)), 100)
+        except ValueError:
+            page_size = 25
+        qs = ImportedAppointment.objects.filter(is_past=True).order_by("-start_time")
+        total_count = qs.count()
+        total_pages = max(1, (total_count + page_size - 1) // page_size) if total_count else 1
+        page = min(page, total_pages)
+        offset = (page - 1) * page_size
+        qs = qs[offset : offset + page_size]
+        items = [
+            {
+                "id": a.id,
+                "name": a.name,
+                "email": a.email,
+                "phone": a.phone or "",
+                "service_name": a.service_name,
+                "start_time": a.start_time.isoformat() if a.start_time else None,
+                "end_time": a.end_time.isoformat() if a.end_time else None,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in qs
+        ]
+        return Response({
+            "past_appointments": items,
+            "count": len(items),
+            "page": page,
+            "page_size": page_size,
+            "total_count": total_count,
+            "total_pages": total_pages,
+        }, status=status.HTTP_200_OK)

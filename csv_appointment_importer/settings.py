@@ -25,7 +25,10 @@ SECRET_KEY = 'django-insecure-n9*40%=jdo@)vv(mr9uf92_tb*7q@^y8-sx02i=7j-q)pi&vg9
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+
+# Allow React dev server (Vite on port 5173) to send requests
+CSRF_TRUSTED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
 # Application definition

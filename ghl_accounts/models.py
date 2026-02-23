@@ -15,6 +15,31 @@ class GHLAuthCredentials(models.Model):
         return f"{self.user_id} - {self.company_id} - {self.location_id}"
 
 
+class GHLService(models.Model):
+    """
+    GHL service from the services catalog. Synced via GET /calendars/services/catalog.
+    Used to resolve service_id from service_name when importing CSV (no need to put service_id in Excel).
+    """
+    location_id = models.CharField(max_length=255, db_index=True)
+    service_id = models.CharField(max_length=255)
+    name = models.CharField(max_length=255)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["location_id", "service_id"],
+                name="unique_location_ghl_service",
+            )
+        ]
+        ordering = ["location_id", "name"]
+        verbose_name = "GHL service (catalog)"
+        verbose_name_plural = "GHL services (catalog)"
+
+    def __str__(self):
+        return f"{self.location_id} | {self.name} ({self.service_id})"
+
+
 class ServiceCalendarMapping(models.Model):
     """Maps human-readable service_name to GHL calendar/service/staff IDs per location."""
     location_id = models.CharField(max_length=255, db_index=True)
