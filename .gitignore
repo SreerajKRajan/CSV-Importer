@@ -3,3 +3,14 @@ venv/
 __pycache__/
 *.pyc
 db.sqlite3
+
+# Celery Beat
+celerybeat-schedule*
+*.wal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Optional test data
+*.csv
