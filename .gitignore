@@ -14,3 +14,5 @@ Thumbs.db
 
 # Optional test data
 *.csv
+celerybeat.pid
+staticfiles/
