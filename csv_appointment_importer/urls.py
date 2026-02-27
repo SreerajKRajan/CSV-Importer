@@ -16,6 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from django.views.generic import RedirectView
 
 from ghl_accounts.views import import_app_page
 
@@ -23,4 +24,5 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("ghl_accounts.urls")),
     path("app/", import_app_page, name="import_app_page"),
+    path("", RedirectView.as_view(url="/app/", permanent=False)),
 ]

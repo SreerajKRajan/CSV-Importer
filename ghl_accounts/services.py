@@ -11,8 +11,10 @@ from django.utils import timezone as django_tz
 from ghl_accounts.csv_parser import parse_csv_rows
 from ghl_accounts.ghl_client import (
     create_contact,
+    create_contact_note,
     create_service_booking,
     get_contact_id_by_email,
+    update_contact,
 )
 from ghl_accounts.models import GHLAuthCredentials, GHLService, ImportedAppointment, ServiceCalendarMapping
 
@@ -206,6 +208,8 @@ def run_import(
         email = (record.get("email") or "").strip()
         phone = record.get("phone", "")
         service_name = (record.get("service_name") or "").strip()
+        staff_name = (record.get("staff_name") or record.get("staff_id") or "").strip()
+        csv_staff_id = (record.get("staff_id") or "").strip()
         start_dt = record["_start_dt"]
         end_dt = record["_end_dt"]
         tz_name = (record.get("timezone") or "UTC").strip() or "UTC"
@@ -222,14 +226,26 @@ def run_import(
         if end_dt.tzinfo is None:
             end_dt = end_dt.replace(tzinfo=timezone.utc)
 
-        # Step 1: Get or create contact
+        # Step 1: Get contact by email; if found update it, if not create it (create-or-update to avoid duplicate errors)
         contact_id, search_error = get_contact_id_by_email(
             access_token=access_token,
             location_id=location_id,
             email=email,
             version=version or None,
         )
-        if not contact_id:
+        if contact_id:
+            _, update_error = update_contact(
+                access_token=access_token,
+                location_id=location_id,
+                contact_id=contact_id,
+                name=name,
+                email=email,
+                phone=phone,
+                version=version or None,
+            )
+            if update_error:
+                logger.warning("Row %s: could not update contact: %s", row_num, update_error)
+        else:
             contact_id, create_error = create_contact(
                 access_token=access_token,
                 location_id=location_id,
@@ -247,26 +263,50 @@ def run_import(
             row_results.append({"row": row_num, "success": False, "error": msg})
             continue
 
-        # Step 2: Past vs future
+        notes_text = (record.get("notes") or "").strip()
+
+        # Past: save to DB only (notes stored in DB, not sent to GHL)
         if start_dt < now:
             ImportedAppointment.objects.create(
+                location_id=location_id or "",
                 name=name,
                 email=email,
                 phone=phone,
                 service_name=service_name,
+                staff_name=staff_name,
+                staff_id=csv_staff_id,
                 start_time=start_dt,
                 end_time=end_dt,
                 is_past=True,
                 ghl_booking_id=None,
+                notes=notes_text,
             )
             imported += 1
             past_count += 1
-            row_results.append({"row": row_num, "success": True, "ghl_booking_id": None, "is_past": True})
+            row_results.append({
+                "row": row_num,
+                "success": True,
+                "ghl_booking_id": None,
+                "is_past": True,
+            })
             continue
 
-        # Future: resolve service_id (from catalog or mapping) and staff_id (from CSV or mapping)
+        # Future: create note on GHL contact if CSV has notes (past: notes only in DB, not sent to GHL)
+        note_error = None
+        if notes_text:
+            _, note_error = create_contact_note(
+                access_token=access_token,
+                location_id=location_id,
+                contact_id=contact_id,
+                body=notes_text,
+                user_id=creds.user_id or None,
+                version=version or None,
+            )
+            if note_error:
+                logger.warning("Row %s: could not create contact note: %s", row_num, note_error)
+
+        # Resolve service_id (from catalog or mapping) and staff_id (from CSV or mapping)
         csv_service_id = (record.get("service_id") or "").strip()
-        csv_staff_id = (record.get("staff_id") or "").strip()
         service_id, staff_id, calendar_id = _resolve_service_and_staff(
             location_id, service_name, csv_service_id, csv_staff_id
         )
@@ -277,18 +317,28 @@ def run_import(
             )
             errors.append(err_msg)
             ImportedAppointment.objects.create(
+                location_id=location_id or "",
                 name=name,
                 email=email,
                 phone=phone,
                 service_name=service_name,
+                staff_name=staff_name,
+                staff_id=csv_staff_id,
                 start_time=start_dt,
                 end_time=end_dt,
                 is_past=False,
                 ghl_booking_id=None,
+                notes=notes_text,
             )
             imported += 1
             future_count += 1
-            row_results.append({"row": row_num, "success": True, "ghl_booking_id": None, "error": err_msg})
+            row_results.append({
+                "row": row_num,
+                "success": True,
+                "ghl_booking_id": None,
+                "error": err_msg,
+                "note_error": note_error,
+            })
             continue
 
         booking_id, booking_error = create_service_booking(
@@ -306,24 +356,39 @@ def run_import(
         )
 
         ImportedAppointment.objects.create(
+            location_id=location_id or "",
             name=name,
             email=email,
             phone=phone,
             service_name=service_name,
+            staff_name=staff_name,
+            staff_id=staff_id,
             start_time=start_dt,
             end_time=end_dt,
             is_past=False,
             ghl_booking_id=booking_id,
+            notes=notes_text,
         )
         imported += 1
         future_count += 1
         if booking_id:
             created_bookings += 1
-            row_results.append({"row": row_num, "success": True, "ghl_booking_id": booking_id, "is_past": False})
+            row_results.append({
+                "row": row_num,
+                "success": True,
+                "ghl_booking_id": booking_id,
+                "is_past": False,
+                "note_error": note_error,
+            })
         else:
             friendly = _friendly_booking_error(booking_error)
             errors.append(friendly)
-            row_results.append({"row": row_num, "success": False, "error": friendly})
+            row_results.append({
+                "row": row_num,
+                "success": False,
+                "error": friendly,
+                "note_error": note_error,
+            })
 
     return {
         "success": True,

@@ -141,6 +141,35 @@ def get_calendar_detail(
         return (None, str(e))
 
 
+def get_contact(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Get a contact by ID. Returns (contact_dict, None) or (None, error_detail).
+    GET /contacts/:contactId
+    Contact dict may have email, phone, phones (list), etc.
+    """
+    url = f"{GHL_API_BASE}/contacts/{contact_id}"
+    headers = _headers(access_token, location_id, version)
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        contact = data.get("contact") or data
+        if isinstance(contact, dict):
+            return (contact, None)
+        return (None, "Unexpected contact response shape")
+    except requests.HTTPError as e:
+        _log_response_error("GHL get contact", e.response)
+        return (None, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL get contact failed for contact_id=%s: %s", contact_id, e)
+        return (None, str(e))
+
+
 def get_contact_id_by_email(
     access_token: str,
     location_id: str,
@@ -213,6 +242,170 @@ def create_contact(
     except requests.RequestException as e:
         logger.warning("GHL create contact failed for email=%s: %s", email, e)
         return (None, str(e))
+
+
+def update_contact(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    name: str,
+    email: str,
+    phone: str = "",
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Update a GHL contact. Returns (True, None) on success, (False, error_detail) on failure.
+    PUT /contacts/:contactId
+    Use when contact already exists (e.g. found by email) to sync name/phone from CSV and avoid duplicate errors.
+    """
+    url = f"{GHL_API_BASE}/contacts/{contact_id}"
+    headers = _headers(access_token, location_id, version)
+    parts = (name or "").strip().split(None, 1)
+    first_name = parts[0] if parts else ""
+    last_name = parts[1] if len(parts) > 1 else ""
+    payload = {
+        "firstName": first_name,
+        "lastName": last_name,
+        "name": name or "",
+        "email": email,
+        "phone": phone or "",
+    }
+    try:
+        resp = requests.put(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return (True, None)
+    except requests.HTTPError as e:
+        _log_response_error("GHL update contact", e.response)
+        return (False, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL update contact failed for contact_id=%s: %s", contact_id, e)
+        return (False, str(e))
+
+
+def get_contact_notes(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[Optional[list], Optional[str]]:
+    """
+    Get all notes for a GHL contact. Returns (list of note dicts with id/body, None) or (None, error_detail).
+    GET /contacts/:contactId/notes
+    """
+    url = f"{GHL_API_BASE}/contacts/{contact_id}/notes"
+    headers = _headers(access_token, location_id, version)
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        try:
+            data = resp.json() or {}
+        except Exception:
+            data = {}
+        notes = data.get("notes") or data.get("note") or data.get("data") or []
+        if isinstance(notes, dict):
+            notes = [notes]
+        if not isinstance(notes, list):
+            notes = []
+        return (notes, None)
+    except requests.HTTPError as e:
+        _log_response_error("GHL get contact notes", e.response)
+        return (None, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL get contact notes failed for contact=%s: %s", contact_id, e)
+        return (None, str(e))
+
+
+def update_contact_note(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    note_id: str,
+    body: str,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Update a GHL contact note. Returns (True, None) on success, (False, error_detail) on failure.
+    PUT /contacts/:contactId/notes/:id
+    """
+    if not (body or "").strip():
+        return (True, None)
+    url = f"{GHL_API_BASE}/contacts/{contact_id}/notes/{note_id}"
+    headers = _headers(access_token, location_id, version)
+    payload = {"body": (body or "").strip()}
+    try:
+        resp = requests.put(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return (True, None)
+    except requests.HTTPError as e:
+        _log_response_error("GHL update contact note", e.response)
+        return (False, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL update contact note failed for contact=%s note=%s: %s", contact_id, note_id, e)
+        return (False, str(e))
+
+
+def create_contact_note(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    body: str,
+    user_id: Optional[str] = None,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Create a note on a GHL contact. Returns (True, None) on success, (False, error_detail) on failure.
+    POST /contacts/:contactId/notes
+    """
+    if not (body or "").strip():
+        return (True, None)
+    url = f"{GHL_API_BASE}/contacts/{contact_id}/notes"
+    headers = _headers(access_token, location_id, version)
+    payload = {"body": (body or "").strip()}
+    if user_id:
+        payload["userId"] = user_id
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return (True, None)
+    except requests.HTTPError as e:
+        _log_response_error("GHL create contact note", e.response)
+        return (False, _response_error_detail(e.response))
+    except requests.RequestException as e:
+        logger.warning("GHL create contact note failed for contact=%s: %s", contact_id, e)
+        return (False, str(e))
+
+
+def create_or_update_contact_note(
+    access_token: str,
+    location_id: str,
+    contact_id: str,
+    body: str,
+    user_id: Optional[str] = None,
+    version: Optional[str] = "2021-07-28",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Create or update a note on a GHL contact (for future appointments). If contact has notes, update the first;
+    otherwise create. Avoids duplicate notes on repeated imports. Returns (True, None) or (False, error_detail).
+    """
+    if not (body or "").strip():
+        return (True, None)
+    try:
+        notes, err = get_contact_notes(access_token, location_id, contact_id, version)
+        if err:
+            logger.warning("GHL get contact notes failed, will try create: %s", err)
+            return create_contact_note(access_token, location_id, contact_id, body, user_id, version)
+        if notes and isinstance(notes, list) and len(notes) > 0:
+            first = notes[0]
+            if isinstance(first, dict):
+                note_id = first.get("id") or first.get("noteId") or first.get("_id")
+                if note_id and str(note_id).strip():
+                    return update_contact_note(
+                        access_token, location_id, contact_id, str(note_id), body, version
+                    )
+        return create_contact_note(access_token, location_id, contact_id, body, user_id, version)
+    except Exception as e:
+        logger.exception("create_or_update_contact_note failed: %s", e)
+        return (False, str(e))
 
 
 def create_service_booking(

@@ -24,15 +24,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("SECRET_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY") or "dev-key-only-for-local-runserver-change-in-production"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG") == "True"
 
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",")
+# Default to localhost so frontend (Vite proxy or direct) can reach backend when running locally
+_allowed = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").strip()
+ALLOWED_HOSTS = list(dict.fromkeys(h.strip() for h in _allowed.split(",") if h.strip()))
+# Always allow localhost for local dev (runserver, Vite proxy)
+for host in ("localhost", "127.0.0.1"):
+    if host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
 
-# Allow React dev server (Vite on port 5173) to send requests
-CSRF_TRUSTED_ORIGINS = ["https://csvapptimporter.automatedoctor.com", "http://54.164.121.137", "http://localhost:5173", "http://127.0.0.1:5173"]
+# CSRF: set in .env as comma-separated (e.g. https://csvapptimporter.automatedoctor.com,https://your-aws-domain.com)
+_csrf = os.getenv("CSRF_TRUSTED_ORIGINS", "https://csvapptimporter.automatedoctor.com,http://localhost:5173,http://127.0.0.1:5173").strip()
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf.split(",") if o.strip()]
 
 
 # Application definition
@@ -56,6 +63,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'csv_appointment_importer.middleware.AllowGHLFrameMiddleware',
 ]
 
 ROOT_URLCONF = 'csv_appointment_importer.urls'
@@ -77,24 +85,27 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'csv_appointment_importer.wsgi.application'
 
+# Allow embedding in GHL iframe (CSP frame-ancestors set in AllowGHLFrameMiddleware)
+X_FRAME_OPTIONS = ""
+
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME"),
-        "USER": os.getenv("DB_USER"),
-        "PASSWORD": os.getenv("DB_PASSWORD"),
-        "HOST": os.getenv("DB_HOST"),
-        "PORT": os.getenv("DB_PORT", "5432"),
-	"OPTIONS": {
-            "sslmode": "require",
-        },
-	"CONN_MAX_AGE": 60,
-    }
+_db_host = (os.getenv("DB_HOST") or "").strip() or "localhost"
+_db_conn = {
+    "ENGINE": "django.db.backends.postgresql",
+    "NAME": os.getenv("DB_NAME"),
+    "USER": os.getenv("DB_USER"),
+    "PASSWORD": os.getenv("DB_PASSWORD"),
+    "HOST": _db_host,
+    "PORT": os.getenv("DB_PORT", "5432"),
+    "CONN_MAX_AGE": 60,
 }
+if _db_host not in ("localhost", "127.0.0.1"):
+    _db_conn["OPTIONS"] = {"sslmode": "require"}
+
+DATABASES = {"default": _db_conn}
 
 
 

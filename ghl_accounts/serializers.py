@@ -5,7 +5,7 @@ class ImportAppointmentsSerializer(serializers.Serializer):
     """Request: CSV file. Optional: location_id, dry_run, override_availability, date_format, column_mapping."""
 
     file = serializers.FileField(
-        help_text="CSV with columns: id, name, email, phone, service_name, staff_name, staff_id, start_time, end_time, timezone, status (service_id resolved from catalog by service_name)"
+        help_text="CSV with columns: id, name, email, phone, service_name, staff_name, staff_id, start_time, end_time, timezone, status, notes (service_id from catalog; notes added as GHL contact note)"
     )
     location_id = serializers.CharField(
         max_length=255,

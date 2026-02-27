@@ -24,7 +24,12 @@ class ServiceCalendarMappingAdmin(admin.ModelAdmin):
 
 @admin.register(ImportedAppointment)
 class ImportedAppointmentAdmin(admin.ModelAdmin):
-    list_display = ("email", "service_name", "start_time", "is_past", "ghl_booking_id", "created_at")
+    list_display = ("email", "service_name", "start_time", "is_past", "ghl_booking_id", "notes_preview", "created_at")
     list_filter = ("is_past",)
-    search_fields = ("email", "name", "service_name")
+    search_fields = ("email", "name", "service_name", "notes")
     readonly_fields = ("created_at",)
+
+    def notes_preview(self, obj):
+        return (obj.notes or "")[:50] + ("…" if (obj.notes or "") and len(obj.notes) > 50 else "")
+
+    notes_preview.short_description = "Notes"

@@ -10,7 +10,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ghl_accounts.ghl_client import get_calendar_detail, get_calendars, get_services_catalog
+from ghl_accounts.ghl_client import get_calendar_detail, get_calendars, get_contact, get_services_catalog
 from ghl_accounts.models import GHLAuthCredentials, GHLService, ImportedAppointment
 from ghl_accounts.serializers import ImportAppointmentsSerializer
 from ghl_accounts.services import run_import
@@ -78,10 +78,12 @@ def tokens(request):
     try:
         response_data = response.json()
         if not response_data:
-            return
+            return JsonResponse({"error": "Empty response from OAuth"}, status=500)
 
-        obj, created = GHLAuthCredentials.objects.update_or_create(
-            location_id= response_data.get("locationId"),
+        location_id = response_data.get("locationId") or ""
+
+        GHLAuthCredentials.objects.update_or_create(
+            location_id=location_id,
             defaults={
                 "access_token": response_data.get("access_token"),
                 "refresh_token": response_data.get("refresh_token"),
@@ -89,16 +91,26 @@ def tokens(request):
                 "scope": response_data.get("scope"),
                 "user_type": response_data.get("userType"),
                 "company_id": response_data.get("companyId"),
-                "user_id":response_data.get("userId"),
-
-            }
+                "user_id": response_data.get("userId"),
+            },
         )
+
+        frontend_uri = (config("FRONTEND_URI", default="") or "").strip()
+        if not frontend_uri and "127.0.0.1:8000" in (config("BASE_URI", default="") or ""):
+            frontend_uri = "http://localhost:5173"
+        if frontend_uri:
+            from urllib.parse import urlencode
+            params = {"onboarding": "success"}
+            if location_id:
+                params["location_id"] = location_id
+            return redirect(f"{frontend_uri.rstrip('/')}/?{urlencode(params)}")
+
         return JsonResponse({
             "message": "Authentication successful",
-            "access_token": response_data.get('access_token'),
-            "token_stored": True
+            "access_token": response_data.get("access_token"),
+            "token_stored": True,
         })
-        
+
     except requests.exceptions.JSONDecodeError:
         return JsonResponse({
             "error": "Invalid JSON response from API",
@@ -138,15 +150,22 @@ class ImportAppointmentsView(APIView):
         date_format = (serializer.validated_data.get("date_format") or "").strip() or None
         column_mapping = serializer.validated_data.get("column_mapping")
 
-        result = run_import(
-            file_content=file_content,
-            location_id=location_id,
-            version="2021-07-28",
-            dry_run=dry_run,
-            override_availability=override_availability,
-            date_format=date_format,
-            column_mapping=column_mapping,
-        )
+        try:
+            result = run_import(
+                file_content=file_content,
+                location_id=location_id,
+                version="2021-07-28",
+                dry_run=dry_run,
+                override_availability=override_availability,
+                date_format=date_format,
+                column_mapping=column_mapping,
+            )
+        except Exception as e:
+            logger.exception("Import failed: %s", e)
+            return Response(
+                {"success": False, "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         if not result.get("success"):
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
@@ -290,16 +309,28 @@ class SyncServicesCatalogView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+def _normalize_phone(phone):
+    """Strip to digits for matching."""
+    if not phone:
+        return ""
+    return "".join(c for c in str(phone) if c.isdigit())
+
+
 class PastAppointmentsListView(APIView):
     """
-    GET /api/past-appointments/?page=1&page_size=25
+    GET /api/past-appointments/?page=1&page_size=25&location_id=xxx&contact_id=yyy
     Returns past appointments saved in DB (is_past=True) from CSV imports.
+    location_id is required. Optional contact_id: fetch GHL contact and filter by email/phone.
     Paginated: page (1-based), page_size (default 25, max 100).
     """
 
     def get(self, request):
+        from django.db.models import Q
+
         page = request.query_params.get("page", "1")
         page_size = request.query_params.get("page_size", "25")
+        location_id = (request.query_params.get("location_id") or "").strip()
+        contact_id = (request.query_params.get("contact_id") or "").strip()
         try:
             page = max(1, int(page))
         except ValueError:
@@ -308,25 +339,91 @@ class PastAppointmentsListView(APIView):
             page_size = min(max(1, int(page_size)), 100)
         except ValueError:
             page_size = 25
-        qs = ImportedAppointment.objects.filter(is_past=True).order_by("-start_time")
+
+        if not location_id:
+            return Response({
+                "past_appointments": [],
+                "count": 0,
+                "page": 1,
+                "page_size": page_size,
+                "total_count": 0,
+                "total_pages": 1,
+                "message": "Open this app from your GoHighLevel location to see past appointments for that location.",
+            }, status=status.HTTP_200_OK)
+
+        creds = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        if not creds:
+            return Response({
+                "past_appointments": [],
+                "count": 0,
+                "page": 1,
+                "page_size": page_size,
+                "total_count": 0,
+                "total_pages": 1,
+                "message": "Location not found in system. Connect GoHighLevel for this location first.",
+            }, status=status.HTTP_200_OK)
+
+        qs = ImportedAppointment.objects.filter(is_past=True, location_id=location_id).order_by("-start_time")
+
+        if contact_id:
+            contact, contact_err = get_contact(
+                access_token=creds.access_token,
+                location_id=location_id,
+                contact_id=contact_id,
+            )
+            if contact_err or not contact:
+                return Response({
+                    "past_appointments": [],
+                    "count": 0,
+                    "page": 1,
+                    "page_size": page_size,
+                    "total_count": 0,
+                    "total_pages": 1,
+                    "message": "Contact not found or could not load from GoHighLevel.",
+                }, status=status.HTTP_200_OK)
+            contact_email = (contact.get("email") or "").strip().lower()
+            contact_phones = []
+            main_phone = (contact.get("phone") or "").strip()
+            if main_phone:
+                contact_phones.append(_normalize_phone(main_phone))
+            for p in contact.get("phones") or []:
+                num = (p.get("phone") or p.get("number") or "").strip()
+                if num:
+                    contact_phones.append(_normalize_phone(num))
+            if contact_phones:
+                contact_phones = [p for p in contact_phones if p]
+            if contact_email or contact_phones:
+                q = Q()
+                if contact_email:
+                    q |= Q(email__iexact=contact_email)
+                for p in contact_phones:
+                    if p:
+                        q |= Q(phone__icontains=p)
+                qs = qs.filter(q)
+            else:
+                qs = qs.none()
+
         total_count = qs.count()
         total_pages = max(1, (total_count + page_size - 1) // page_size) if total_count else 1
         page = min(page, total_pages)
         offset = (page - 1) * page_size
         qs = qs[offset : offset + page_size]
-        items = [
-            {
+        items = []
+        for a in qs:
+            notes_val = getattr(a, "notes", None) or ""
+            items.append({
                 "id": a.id,
                 "name": a.name,
                 "email": a.email,
                 "phone": a.phone or "",
                 "service_name": a.service_name,
+                "staff_name": getattr(a, "staff_name", "") or "",
+                "staff_id": getattr(a, "staff_id", "") or "",
                 "start_time": a.start_time.isoformat() if a.start_time else None,
                 "end_time": a.end_time.isoformat() if a.end_time else None,
+                "notes": (notes_val if isinstance(notes_val, str) else "").strip(),
                 "created_at": a.created_at.isoformat() if a.created_at else None,
-            }
-            for a in qs
-        ]
+            })
         return Response({
             "past_appointments": items,
             "count": len(items),

@@ -1,9 +1,9 @@
 """
 CSV parsing for appointment import.
 Supported columns: id, name, email, phone, service_name, staff_name, staff_id,
-start_time, end_time, timezone, status.
-service_id is not required in CSV: we resolve it from service_name via GHLService (synced catalog)
-or ServiceCalendarMapping. staff_id can be in CSV or from mapping.
+start_time, end_time, timezone, status, notes.
+service_id is not required: resolved from service_name via GHLService or ServiceCalendarMapping.
+notes (optional): added to the GHL contact via POST /contacts/:contactId/notes.
 """
 import csv
 import io
@@ -25,6 +25,7 @@ EXPECTED_HEADERS = [
     "end_time",
     "timezone",
     "status",
+    "notes",
 ]
 
 # Date format presets (client requirement: admin selects format)

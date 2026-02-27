@@ -63,15 +63,19 @@ class ServiceCalendarMapping(models.Model):
 
 
 class ImportedAppointment(models.Model):
-    """One row from an imported CSV; may or may not have a GHL booking."""
+    """One row from an imported CSV; may or may not have a GHL booking. Scoped by location_id from URL."""
+    location_id = models.CharField(max_length=255, db_index=True, blank=True, default="")
     name = models.CharField(max_length=255)
     email = models.EmailField()
     phone = models.CharField(max_length=50, blank=True)
     service_name = models.CharField(max_length=255)
+    staff_name = models.CharField(max_length=255, blank=True, default="")
+    staff_id = models.CharField(max_length=255, blank=True, default="")
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     is_past = models.BooleanField(default=False)
     ghl_booking_id = models.CharField(max_length=255, null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
